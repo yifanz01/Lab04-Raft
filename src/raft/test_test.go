@@ -21,7 +21,9 @@ const RaftElectionTimeout = 1000 * time.Millisecond
 
 func TestInitialElection2A(t *testing.T) {
 	servers := 3
+	// 调用Make启动servers个Raft
 	cfg := make_config(t, servers, false, false)
+
 	defer cfg.cleanup()
 
 	cfg.begin("Test (2A): initial election")
@@ -33,6 +35,7 @@ func TestInitialElection2A(t *testing.T) {
 	// election, then check that all peers agree on the term.
 	time.Sleep(50 * time.Millisecond)
 	term1 := cfg.checkTerms()
+	fmt.Printf("Term1: %v", term1)
 	if term1 < 1 {
 		t.Fatalf("term is %v, but should be at least 1", term1)
 	}
@@ -40,6 +43,7 @@ func TestInitialElection2A(t *testing.T) {
 	// does the leader+term stay the same if there is no network failure?
 	time.Sleep(2 * RaftElectionTimeout)
 	term2 := cfg.checkTerms()
+	fmt.Printf("Term2: %v\n", term2)
 	if term1 != term2 {
 		fmt.Printf("warning: term changed even though there were no failures")
 	}
@@ -125,15 +129,15 @@ func TestManyElections2A(t *testing.T) {
 
 func TestBasicAgree2B(t *testing.T) {
 	servers := 3
-	cfg := make_config(t, servers, false, false)
+	cfg := make_config(t, servers, false, false) // 创建3个节点并且互相连接
 	defer cfg.cleanup()
 
 	cfg.begin("Test (2B): basic agreement")
 
 	iters := 3
 	for index := 1; index < iters+1; index++ {
-		nd, _ := cfg.nCommitted(index)
-		if nd > 0 {
+		nd, _ := cfg.nCommitted(index) // 有多少个节点认为下标为index的log已经提交，返回（已提交数，命令）
+		if nd > 0 {                    // todo: 搞清楚nd>0啥意思
 			t.Fatalf("some have committed before Start()")
 		}
 

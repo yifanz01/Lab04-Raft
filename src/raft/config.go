@@ -48,7 +48,7 @@ type config struct {
 	connected   []bool   // whether each server is on the net
 	saved       []*Persister
 	endnames    [][]string            // the port file names each sends to
-	logs        []map[int]interface{} // copy of each server's committed entries
+	logs        []map[int]interface{} // copy of each server's committed entries, logs是一个slice，包含了一系列map，每个map以int为key，interface为value
 	lastApplied []int
 	start       time.Time // time at which make_config() was called
 	// begin()/end() statistics
@@ -94,12 +94,12 @@ func make_config(t *testing.T, n int, unreliable bool, snapshot bool) *config {
 	// create a full set of Rafts.
 	for i := 0; i < cfg.n; i++ {
 		cfg.logs[i] = map[int]interface{}{}
-		cfg.start1(i, applier)
+		cfg.start1(i, applier) // Make在这里被调用
 	}
 
 	// connect everyone
 	for i := 0; i < cfg.n; i++ {
-		cfg.connect(i)
+		cfg.connect(i) // 连接剩下的Raft
 	}
 
 	return cfg
@@ -431,7 +431,7 @@ func (cfg *config) checkOneLeader() int {
 		leaders := make(map[int][]int)
 		for i := 0; i < cfg.n; i++ {
 			if cfg.connected[i] {
-				if term, leader := cfg.rafts[i].GetState(); leader {
+				if term, leader := cfg.rafts[i].GetState(); leader { // 注意：这里的GetState是由我们自己写的
 					leaders[term] = append(leaders[term], i)
 				}
 			}
@@ -494,7 +494,7 @@ func (cfg *config) nCommitted(index int) (int, interface{}) {
 		}
 
 		cfg.mu.Lock()
-		cmd1, ok := cfg.logs[i][index]
+		cmd1, ok := cfg.logs[i][index] // 获得第i个node的下标为index的log内容
 		cfg.mu.Unlock()
 
 		if ok {
@@ -567,21 +567,21 @@ func (cfg *config) one(cmd interface{}, expectedServers int, retry bool) int {
 			}
 			cfg.mu.Unlock()
 			if rf != nil {
-				index1, _, ok := rf.Start(cmd)
-				if ok {
+				index1, _, ok := rf.Start(cmd) // todo 2B要完成的函数
+				if ok {                        // 如果ok 说明start找到了leader，index1指的是这个cmd被committed后所在的index
 					index = index1
 					break
 				}
 			}
 		}
 
-		if index != -1 {
+		if index != -1 { //找到了一个leader，并且这个index就是cmd将要存放的index位置
 			// somebody claimed to be the leader and to have
 			// submitted our command; wait a while for agreement.
 			t1 := time.Now()
-			for time.Since(t1).Seconds() < 2 {
+			for time.Since(t1).Seconds() < 2 { // 循环2秒
 				nd, cmd1 := cfg.nCommitted(index)
-				if nd > 0 && nd >= expectedServers {
+				if nd > 0 && nd >= expectedServers { //已经提交的log数大于expectedServers
 					// committed
 					if cmd1 == cmd {
 						// and it was the command we submitted.
