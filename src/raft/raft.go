@@ -90,6 +90,8 @@ type Raft struct {
 	heartBeatInterval time.Duration //心跳间隔，in the paper, it is 10ms
 	electionTimer     *time.Timer   //选举间隔，if electionTimer is timeout, then start a new election
 	heartbeatsTimer   *time.Timer
+
+	applyCh chan ApplyMsg
 }
 
 // return currentTerm and whether this server
@@ -282,6 +284,21 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	isLeader := true
 
 	// Your code here (2B).
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+
+	if rf.role != Leader {
+		return index, term, false
+	}
+
+	nlog := LogEntry{
+		Command: command,
+		Term:    rf.term,
+	}
+
+	rf.logs = append(rf.logs, nlog)
+	term = rf.term
+	index = len(rf.logs)
 
 	return index, term, isLeader
 }
@@ -353,6 +370,11 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.logs = make([]LogEntry, 0)
 	rf.nextIndex = make([]int, len(peers))
 	rf.matchIndex = make([]int, len(peers))
+
+	rf.commitIndex = -1
+	rf.lastApplied = -1
+	rf.applyCh = applyCh
+
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
 
@@ -452,14 +474,10 @@ func (rf *Raft) HeartBeat() {
 			return
 		}
 		rf.heartbeatsTimer.Reset(rf.heartBeatInterval)
-		args := AppendEntriesArgs{
-			Term:     rf.term,
-			LeaderId: rf.me,
-		}
 		rf.mu.Unlock()
 
-		heartBeatNoResp := 0
-		wg := sync.WaitGroup{}
+		//heartBeatNoResp := 0
+		//wg := sync.WaitGroup{}
 		// sending heartbeat to it's follower
 		for i := 0; i < len(rf.peers); i++ {
 			if i == rf.me {
@@ -469,6 +487,22 @@ func (rf *Raft) HeartBeat() {
 				rf.mu.Unlock()
 				continue
 			}
+
+			// According to the Figure2, set the Arguments
+			args := AppendEntriesArgs{
+				Term:         rf.term,
+				LeaderId:     rf.me,
+				PrevLogIndex: rf.nextIndex[i] - 1, // 这就是prevLogIndex和nextIndex[i]的关系，Leader会说：Hi server！我相信你在prevLogIndex这个位置有这个log。如果server没有，就把nextIndex[i] -1
+			}
+
+			if args.PrevLogIndex >= 0 {
+				args.PrevLogTerm = rf.logs[args.PrevLogIndex].Term
+			}
+
+			if rf.nextIndex[i] < len(rf.logs) {
+				args.Entries = rf.logs[rf.nextIndex[i]:]
+			}
+			args.LeaderCommit = rf.commitIndex
 
 			//args.PrevLogIndex = rf.nextIndex[i] - 1
 			//if args.PrevLogIndex >= 0 {
@@ -486,39 +520,43 @@ func (rf *Raft) HeartBeat() {
 				break
 			}
 			rf.mu.Unlock()
-			wg.Add(1)
+			//wg.Add(1)
 
 			go func(i int) {
-				defer wg.Done()
+				//defer wg.Done()
 				reply := AppendEntriesReply{}
-				ok := rf.peers[i].Call("Raft.AppendEntries", &args, &reply)
+			retry:
+				ok := rf.peers[i].Call("Raft.AppendEntries", args, &reply)
 				if !ok {
 					// receive no response from peers[i]
-					rf.mu.Lock()
-					heartBeatNoResp++
-					rf.mu.Unlock()
-					return
+					//rf.mu.Lock()
+					//heartBeatNoResp++
+					//rf.mu.Unlock()
+					goto retry
+
+				} else {
+					rf.handleAppendEntries(i, &reply)
 				}
 
-				rf.mu.Lock()
-				if reply.Term > rf.term {
-					rf.term = reply.Term
-					rf.role = Follower
-					rf.voteFor = -1
-				}
-				rf.mu.Unlock()
+				//rf.mu.Lock()
+				//if reply.Term > rf.term {
+				//	rf.term = reply.Term
+				//	rf.role = Follower
+				//	rf.voteFor = -1
+				//}
+				//rf.mu.Unlock()
 
 			}(i)
 		}
-		wg.Wait()
-		rf.mu.Lock()
-		if heartBeatNoResp > len(rf.peers)/2 && rf.role == Leader {
-			rf.role = Follower
-			rf.voteFor = -1
-			rf.mu.Unlock()
-			return
-		}
-		rf.mu.Unlock()
+		//wg.Wait()
+		//rf.mu.Lock()
+		//if heartBeatNoResp > len(rf.peers)/2 && rf.role == Leader {
+		//	rf.role = Follower
+		//	rf.voteFor = -1
+		//	rf.mu.Unlock()
+		//	return
+		//}
+		//rf.mu.Unlock()
 	}
 }
 
@@ -532,26 +570,118 @@ type AppendEntriesArgs struct {
 }
 
 type AppendEntriesReply struct {
-	Term    int
-	Success bool
+	Term        int
+	Success     bool
+	CommitIndex int
 }
 
-func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
+// What a Server will do after receiving the heartbeat from a Leader
+// 判断Server的Term和Leader的Term，如果Server的大，就拒接
+// 进行错误判断，Leader保存的nextIndex为Leader的log长度，而Follower的log可能不大于nextIndex，原因1:这个Follower可能是Leader但一部分没有提交
+// 原因2:原来就是follower，但是一部分数据丢失，此时要使Leader减少PrevLogIndex来寻找各个节点相同的日志
+// Follwer的log比Leader记录的nextIndex多，说明存在冲突，保留PrevLogIndex前面的log，在尾部添加RPC请求中的log并commit
+// 如果RPC请求中log为空，说明该RPC为Hearbeat，改变server状态，因为此server可能还是candidate，并提交未提交的log
+func (rf *Raft) AppendEntries(args AppendEntriesArgs, reply *AppendEntriesReply) {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 	reply.Term = rf.term
-	// if the Leader's term is greater than mine
-	if args.Term >= rf.term {
-		rf.electionTimer = time.NewTimer(rf.randomTimeout())
-		// DPrintf("Node: %v, election time: %v", rf.me, rf.electionTimer)
-		rf.role = Follower
-		rf.term = args.Term
-	} else if rf.term > args.Term {
-		// todo：
-		// 目前个人推测，当一个节点收到落后于自己的term只可能发生在网络分区的情况下
-		// 这个时候的leader其实没有什么意义
+	// if the Leader's term is smaller than mine
+	if rf.term > args.Term {
 		reply.Success = false
 		reply.Term = rf.term
+		rf.electionTimer = time.NewTimer(rf.randomTimeout())
+		return
+	} else { //现在自己是server，而不是leader
+		rf.role = Follower
+		rf.term = args.Term
+		rf.voteFor = -1
+		reply.Term = rf.term
 
+		// 如果leader有log,
+		if args.PrevLogIndex >= 0 &&
+			(len(rf.logs)-1 < args.PrevLogIndex || // 这个条件是说：并且这个follower的log小于leader
+				rf.logs[args.PrevLogIndex].Term != args.PrevLogTerm) { // 这个条件是说：如果follower在PrevLogIndex位置有一个entry，
+			reply.CommitIndex = len(rf.logs) - 1
+			if reply.CommitIndex > args.PrevLogIndex {
+				reply.CommitIndex = args.PrevLogIndex
+			}
+			for reply.CommitIndex >= 0 {
+				if rf.logs[reply.CommitIndex].Term != args.Term { // todo: 为什么只检查term而不查具体的cmd
+					reply.CommitIndex--
+				} else {
+					break
+				}
+			}
+			reply.Success = false
+		} else if args.Entries == nil {
+
+		} else { // 接受这个rpc
+			reply.Success = true
+		}
 	}
+	//if args.Term >= rf.term {
+	//	rf.electionTimer = time.NewTimer(rf.randomTimeout())
+	//	// DPrintf("Node: %v, election time: %v", rf.me, rf.electionTimer)
+	//	rf.role = Follower
+	//	rf.term = args.Term
+	//} else if rf.term > args.Term {
+	//	// todo：
+	//	// 目前个人推测，当一个节点收到落后于自己的term只可能发生在网络分区的情况下
+	//	// 这个时候的leader其实没有什么意义
+	//	reply.Success = false
+	//	reply.Term = rf.term
+	//
+	//}
+}
+
+// What a Leader will do after receiving the feedback from servers
+func (rf *Raft) handleAppendEntries(server int, reply *AppendEntriesReply) {
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+
+	if rf.role != Leader {
+		return
+	}
+	// 网络分区
+	if reply.Term > rf.term {
+		rf.role = Follower
+		rf.term = reply.Term
+		rf.voteFor = -1
+		rf.electionTimer = time.NewTimer(rf.randomTimeout())
+		return
+	}
+
+	if reply.Success {
+		rf.nextIndex[server] = reply.CommitIndex + 1
+		rf.matchIndex[server] = reply.CommitIndex
+		if rf.nextIndex[server] > len(rf.logs) {
+			rf.nextIndex[server] = len(rf.logs)
+			rf.matchIndex[server] = rf.nextIndex[server] - 1
+		}
+		commitCount := 1
+
+		for i := 0; i < len(rf.peers); i++ {
+			if i == rf.me {
+				continue
+			}
+			if rf.matchIndex[i] >= rf.matchIndex[server] {
+				commitCount += 1
+			}
+		}
+		// 当大部分follower都回复的时候就可以commit
+		if commitCount > len(rf.peers)/2 &&
+			rf.commitIndex < rf.matchIndex[server] &&
+			rf.logs[rf.matchIndex[server]].Term == rf.term {
+			rf.commitIndex = rf.matchIndex[server]
+			go rf.commitLog()
+		}
+	} else {
+		rf.nextIndex[server] = reply.CommitIndex + 1
+
+		if rf.nextIndex[server] > len(rf.logs) {
+			rf.nextIndex[server] = len(rf.logs) //rf.nextIndex不可能超过当前leader的log长度
+		}
+	}
+	rf.electionTimer = time.NewTimer(rf.randomTimeout())
+
 }

@@ -8,7 +8,9 @@ package raft
 // test with the original before submitting.
 //
 
-import "6.5840/labgob"
+import (
+	"6.5840/labgob"
+)
 import "6.5840/labrpc"
 import "bytes"
 import "log"
@@ -495,6 +497,7 @@ func (cfg *config) nCommitted(index int) (int, interface{}) {
 
 		cfg.mu.Lock()
 		cmd1, ok := cfg.logs[i][index] // 获得第i个node的下标为index的log内容
+		DPrintf("The log: %v\n", cmd1)
 		cfg.mu.Unlock()
 
 		if ok {
@@ -567,7 +570,7 @@ func (cfg *config) one(cmd interface{}, expectedServers int, retry bool) int {
 			}
 			cfg.mu.Unlock()
 			if rf != nil {
-				index1, _, ok := rf.Start(cmd) // todo 2B要完成的函数
+				index1, _, ok := rf.Start(cmd) // todo 2B要完成的函数, index1是等于leader当前log的len
 				if ok {                        // 如果ok 说明start找到了leader，index1指的是这个cmd被committed后所在的index
 					index = index1
 					break
@@ -580,7 +583,7 @@ func (cfg *config) one(cmd interface{}, expectedServers int, retry bool) int {
 			// submitted our command; wait a while for agreement.
 			t1 := time.Now()
 			for time.Since(t1).Seconds() < 2 { // 循环2秒
-				nd, cmd1 := cfg.nCommitted(index)
+				nd, cmd1 := cfg.nCommitted(index)    //检查下标为index的cmd被多少server提交了
 				if nd > 0 && nd >= expectedServers { //已经提交的log数大于expectedServers
 					// committed
 					if cmd1 == cmd {
