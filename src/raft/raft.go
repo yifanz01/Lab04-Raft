@@ -310,19 +310,29 @@ func (rf *Raft) ticker() {
 		// if current node has not been killed
 		// Your code here (2A)
 		// Check if a leader election should be started.
+		if rf.role == Leader {
+			rf.HeartBeat()
+			time.Sleep(rf.heartBeatInterval)
+		} else {
+			time.Sleep(rf.randomTimeout())
+			select {
+			case <-rf.electionTimer.C:
+				rf.ElectLeader()
+			}
+		}
 
 		// pause for a random amount of time between 50 and 350
 		// milliseconds.
 		//ms := 50 + (rand.Int63() % 300)
 		//time.Sleep(time.Duration(ms) * time.Millisecond)
 
-		select {
-		case <-rf.electionTimer.C:
-			//DPrintf("Current node %v", len(rf.peers))
-			rf.ElectLeader()
-		case <-rf.heartbeatsTimer.C:
-			rf.HeartBeat()
-		}
+		//select {
+		//case <-rf.electionTimer.C:
+		//	//DPrintf("Current node %v", len(rf.peers))
+		//	rf.ElectLeader()
+		//case <-rf.heartbeatsTimer.C:
+		//	rf.HeartBeat()
+		//}
 	}
 }
 
