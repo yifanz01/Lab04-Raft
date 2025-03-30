@@ -19,8 +19,6 @@ RAFT is a consensus algorithm designed for managing replicated logs in distribut
 
 ## Repository Structure
 - `src/`: Implementation of the RAFT algorithm
-- `examples/`: Usage examples and test cases
-- `docs/`: Documentation detailing the algorithm and implementation specifics
 ```
 
 ## Authors
